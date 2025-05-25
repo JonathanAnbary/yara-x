@@ -4721,6 +4721,7 @@ dependencies = [
  "uuid",
  "walrus",
  "wasmtime",
+ "winapi",
  "x509-parser",
  "yansi",
  "yara-x-macros",
