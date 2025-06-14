@@ -25,7 +25,7 @@ use yara_x::{MetaValue, Patterns, Rule, Rules, ScanOptions, Scanner};
 use crate::commands::{
     compile_rules, external_var_parser, get_external_vars,
     meta_file_value_parser, path_with_namespace_parser,
-    truncate_with_ellipsis,
+    truncate_with_ellipsis, Target,
 };
 use crate::walk::Message;
 use crate::{help, walk};
@@ -43,7 +43,7 @@ enum OutputFormats {
 #[rustfmt::skip]
 pub fn scan() -> Command {
     super::command("scan")
-        .about("Scan a file or directory")
+        .about("Scan a file, directory, or process")
         .long_about(help::SCAN_LONG_HELP)
         .arg(
             Arg::new("[NAMESPACE:]RULES_PATH")
@@ -53,9 +53,9 @@ pub fn scan() -> Command {
                 .action(ArgAction::Append)
         )
         .arg(
-            arg!(<TARGET_PATH>)
-                .help("Path to the file or directory that will be scanned")
-                .value_parser(value_parser!(PathBuf))
+            arg!(<TARGET>)
+                .help("Path to the file, directory, or Pid of the process that will be scanned")
+                .value_parser(scan_target_parser)
         )
         // Keep options sorted alphabetically by their long name.
         // For instance, --bar goes before --foo.
@@ -165,7 +165,7 @@ pub fn scan() -> Command {
         )
         .arg(
             arg!(--"scan-list")
-                .help("Indicate that TARGET_PATH is a file containing the paths to be scanned")
+                .help("Indicate that TARGET is a file containing the paths to be scanned")
                 .long_help(help::SCAN_LIST_LONG_HELP)
         )
         .arg(
@@ -242,7 +242,7 @@ pub fn exec_scan(args: &ArgMatches) -> anyhow::Result<()> {
         .get_many::<(Option<String>, PathBuf)>("[NAMESPACE:]RULES_PATH")
         .unwrap();
 
-    let target_path = args.get_one::<PathBuf>("TARGET_PATH").unwrap();
+    let target = args.get_one::<Target>("TARGET").unwrap();
     let compiled_rules = args.get_flag("compiled-rules");
     let profiling = args.get_flag("profiling");
     let num_threads = args.get_one::<u8>("threads");
@@ -271,11 +271,21 @@ pub fn exec_scan(args: &ArgMatches) -> anyhow::Result<()> {
         );
     }
 
-    if recursive.is_some() && target_path.is_file() {
-        bail!(
-            "can't use '{}' when <TARGET_PATH> is a file",
-            Paint::bold("--recursive")
-        );
+    if recursive.is_some() {
+        match target {
+            Target::Pid(_) => bail!(
+                "can't use '{}' when <TARGET> is a pid",
+                Paint::bold("--recursive")
+            ),
+            Target::Path(path) => {
+                if path.is_file() {
+                    bail!(
+                        "can't use '{}' when <TARGET> is a file",
+                        Paint::bold("--recursive")
+                    );
+                }
+            }
+        }
     }
 
     let rules = if compiled_rules {
@@ -320,187 +330,205 @@ pub fn exec_scan(args: &ArgMatches) -> anyhow::Result<()> {
 
     let rules_ref = &rules;
 
-    let mut w = if scan_list {
-        walk::ParWalker::file_list(target_path)
-    } else {
-        walk::ParWalker::path(target_path)
-    };
-
-    if let Some(num_threads) = num_threads {
-        w.num_threads(*num_threads);
-    }
-
-    if let Some(max_file_size) = skip_larger {
-        w.metadata_filter(|metadata| metadata.len() <= *max_file_size);
-    }
-
-    w.max_depth(*recursive.unwrap_or(&0));
-
-    let start_time = Instant::now();
-    let state = ScanState::new(start_time);
-
-    let all_metadata = metadata
-        .into_iter()
-        .map(|(module_full_name, metadata_path)| {
-            std::fs::read(Path::new(metadata_path))
-                .map(|meta| (module_full_name.to_string(), meta))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let output_handler = match args.get_one::<OutputFormats>("output-format") {
-        Some(OutputFormats::Json) => {
-            Box::new(JsonOutputHandler::new(args.into()))
-                as Box<dyn OutputHandler>
-        }
-        Some(OutputFormats::Ndjson) => {
-            Box::new(NdJsonOutputHandler::new(args.into()))
-        }
-        None | Some(OutputFormats::Text) => {
-            Box::new(TextOutputHandler::new(args.into()))
-        }
-    };
-
-    #[cfg(feature = "rules-profiling")]
-    let slowest_rules: Mutex<Vec<ProfilingData>> = Mutex::new(Vec::new());
-
-    w.walk(
-        state,
-        // Initialization
-        |_, output| {
-            let mut scanner = Scanner::new(rules_ref);
-
-            if !disable_console_logs {
-                let output = output.clone();
-                scanner.console_log(move |msg| {
-                    output
-                        .send(Message::Error(format!("{}", msg.paint(Yellow))))
-                        .unwrap();
-                });
-            }
-
-            if let Some(ref vars) = external_vars {
-                for (ident, value) in vars {
-                    // It's ok to use `unwrap()`, this can not fail because
-                    // we already verified that external variables are correct.
-                    scanner.set_global(ident.as_str(), value).unwrap();
-                }
-            }
-
-            scanner
-        },
-        // File handler. Called for every file found while walking the path.
-        |state, output, file_path, scanner| {
-            let elapsed_time = Instant::elapsed(&start_time);
-
-            if let Some(timeout) = timeout {
-                // Discount the already elapsed time from the timeout passed to
-                // the scanner.
-                if let Some(timeout) = timeout.checked_sub(elapsed_time) {
-                    scanner.set_timeout(timeout);
-                } else {
-                    return Err(Error::from(ScanError::Timeout));
-                }
-            }
-
-            let now = Instant::now();
-
-            state
-                .files_in_progress
-                .lock()
-                .unwrap()
-                .push((file_path.to_path_buf(), now));
-
-            let scan_options = all_metadata.iter().fold(
-                ScanOptions::new(),
-                |acc, (module_name, meta)| {
-                    acc.set_module_metadata(module_name, meta)
-                },
-            );
-
-            let scan_results = scanner
-                .scan_file_with_options(file_path.as_path(), scan_options)
-                .with_context(|| format!("scanning {:?}", &file_path));
-
-            state
-                .files_in_progress
-                .lock()
-                .unwrap()
-                .retain(|(p, _)| !file_path.eq(p));
-
-            let scan_results = scan_results?;
-            let mut wanted_rules = match args.get_flag("negate") {
-                true => Box::new(scan_results.non_matching_rules())
-                    as Box<dyn ExactSizeIterator<Item = Rule>>,
-                false => Box::new(scan_results.matching_rules()),
-            };
-
-            let matched_count = wanted_rules.len();
-            output_handler.on_file_scanned(
-                &file_path,
-                &mut wanted_rules,
-                output,
-            );
-
-            state.num_scanned_files.fetch_add(1, Ordering::Relaxed);
-            if matched_count > 0 {
-                state.num_matching_files.fetch_add(1, Ordering::Relaxed);
-            }
-
-            Ok(())
-        },
-        // Finalization
-        #[allow(unused_variables)]
-        |scanner, _| {
-            #[cfg(feature = "rules-profiling")]
-            if profiling {
-                let mut mer = slowest_rules.lock().unwrap();
-                for profiling_data in scanner.slowest_rules(1000) {
-                    if let Some(r) = mer.iter_mut().find(|r| {
-                        r.rule == profiling_data.rule
-                            && r.namespace == profiling_data.namespace
-                    }) {
-                        r.condition_exec_time +=
-                            profiling_data.condition_exec_time;
-                        r.pattern_matching_time +=
-                            profiling_data.pattern_matching_time;
-                        r.total_time += profiling_data.condition_exec_time
-                            + profiling_data.pattern_matching_time;
-                    } else {
-                        mer.push(profiling_data.into());
-                    }
-                }
-            }
-        },
-        // Walk done.
-        |output| output_handler.on_done(output),
-        // Error handler
-        |err, output| {
-            let error = err.to_string();
-            let root_cause = err.root_cause().to_string();
-            let msg = if error != root_cause {
-                format!(
-                    "{} {}: {}",
-                    "error: ".paint(Red).bold(),
-                    error,
-                    root_cause,
-                )
+    match target {
+        Target::Path(target_path) => {
+            let mut w = if scan_list {
+                walk::ParWalker::file_list(target_path)
             } else {
-                format!("{}: {}", "error: ".paint(Red).bold(), error)
+                walk::ParWalker::path(target_path)
             };
 
-            let _ = output.send(Message::Error(msg));
-
-            // In case of timeout walk is aborted.
-            if let Ok(scan_err) = err.downcast::<ScanError>() {
-                if matches!(scan_err, ScanError::Timeout) {
-                    return Err(scan_err.into());
-                }
+            if let Some(num_threads) = num_threads {
+                w.num_threads(*num_threads);
             }
 
-            Ok(())
-        },
-    )
-    .unwrap();
+            if let Some(max_file_size) = skip_larger {
+                w.metadata_filter(|metadata| metadata.len() <= *max_file_size);
+            }
+
+            w.max_depth(*recursive.unwrap_or(&0));
+
+            let start_time = Instant::now();
+            let state = ScanState::new(start_time);
+
+            let all_metadata = metadata
+                .into_iter()
+                .map(|(module_full_name, metadata_path)| {
+                    std::fs::read(Path::new(metadata_path))
+                        .map(|meta| (module_full_name.to_string(), meta))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let output_handler =
+                match args.get_one::<OutputFormats>("output-format") {
+                    Some(OutputFormats::Json) => {
+                        Box::new(JsonOutputHandler::new(args.into()))
+                            as Box<dyn OutputHandler>
+                    }
+                    Some(OutputFormats::Ndjson) => {
+                        Box::new(NdJsonOutputHandler::new(args.into()))
+                    }
+                    None | Some(OutputFormats::Text) => {
+                        Box::new(TextOutputHandler::new(args.into()))
+                    }
+                };
+
+            #[cfg(feature = "rules-profiling")]
+            let slowest_rules: Mutex<Vec<ProfilingData>> =
+                Mutex::new(Vec::new());
+
+            w.walk(
+                state,
+                // Initialization
+                |_, output| {
+                    let mut scanner = Scanner::new(rules_ref);
+
+                    if !disable_console_logs {
+                        let output = output.clone();
+                        scanner.console_log(move |msg| {
+                            output
+                                .send(Message::Error(format!(
+                                    "{}",
+                                    msg.paint(Yellow)
+                                )))
+                                .unwrap();
+                        });
+                    }
+
+                    if let Some(ref vars) = external_vars {
+                        for (ident, value) in vars {
+                            // It's ok to use `unwrap()`, this can not fail because
+                            // we already verified that external variables are correct.
+                            scanner.set_global(ident.as_str(), value).unwrap();
+                        }
+                    }
+
+                    scanner
+                },
+                // File handler. Called for every file found while walking the path.
+                |state, output, file_path, scanner| {
+                    let elapsed_time = Instant::elapsed(&start_time);
+
+                    if let Some(timeout) = timeout {
+                        // Discount the already elapsed time from the timeout passed to
+                        // the scanner.
+                        if let Some(timeout) =
+                            timeout.checked_sub(elapsed_time)
+                        {
+                            scanner.set_timeout(timeout);
+                        } else {
+                            return Err(Error::from(ScanError::Timeout));
+                        }
+                    }
+
+                    let now = Instant::now();
+
+                    state
+                        .files_in_progress
+                        .lock()
+                        .unwrap()
+                        .push((file_path.to_path_buf(), now));
+
+                    let scan_options = all_metadata.iter().fold(
+                        ScanOptions::new(),
+                        |acc, (module_name, meta)| {
+                            acc.set_module_metadata(module_name, meta)
+                        },
+                    );
+
+                    let scan_results = scanner
+                        .scan_file_with_options(
+                            file_path.as_path(),
+                            scan_options,
+                        )
+                        .with_context(|| format!("scanning {:?}", &file_path));
+
+                    state
+                        .files_in_progress
+                        .lock()
+                        .unwrap()
+                        .retain(|(p, _)| !file_path.eq(p));
+
+                    let scan_results = scan_results?;
+                    let mut wanted_rules = match args.get_flag("negate") {
+                        true => Box::new(scan_results.non_matching_rules())
+                            as Box<dyn ExactSizeIterator<Item = Rule>>,
+                        false => Box::new(scan_results.matching_rules()),
+                    };
+
+                    let matched_count = wanted_rules.len();
+                    output_handler.on_file_scanned(
+                        &file_path,
+                        &mut wanted_rules,
+                        output,
+                    );
+
+                    state.num_scanned_files.fetch_add(1, Ordering::Relaxed);
+                    if matched_count > 0 {
+                        state
+                            .num_matching_files
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    Ok(())
+                },
+                // Finalization
+                #[allow(unused_variables)]
+                |scanner, _| {
+                    #[cfg(feature = "rules-profiling")]
+                    if profiling {
+                        let mut mer = slowest_rules.lock().unwrap();
+                        for profiling_data in scanner.slowest_rules(1000) {
+                            if let Some(r) = mer.iter_mut().find(|r| {
+                                r.rule == profiling_data.rule
+                                    && r.namespace == profiling_data.namespace
+                            }) {
+                                r.condition_exec_time +=
+                                    profiling_data.condition_exec_time;
+                                r.pattern_matching_time +=
+                                    profiling_data.pattern_matching_time;
+                                r.total_time += profiling_data
+                                    .condition_exec_time
+                                    + profiling_data.pattern_matching_time;
+                            } else {
+                                mer.push(profiling_data.into());
+                            }
+                        }
+                    }
+                },
+                // Walk done.
+                |output| output_handler.on_done(output),
+                // Error handler
+                |err, output| {
+                    let error = err.to_string();
+                    let root_cause = err.root_cause().to_string();
+                    let msg = if error != root_cause {
+                        format!(
+                            "{} {}: {}",
+                            "error: ".paint(Red).bold(),
+                            error,
+                            root_cause,
+                        )
+                    } else {
+                        format!("{}: {}", "error: ".paint(Red).bold(), error)
+                    };
+
+                    let _ = output.send(Message::Error(msg));
+
+                    // In case of timeout walk is aborted.
+                    if let Ok(scan_err) = err.downcast::<ScanError>() {
+                        if matches!(scan_err, ScanError::Timeout) {
+                            return Err(scan_err.into());
+                        }
+                    }
+
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+        Target::Pid(_) => {}
+    }
 
     #[cfg(feature = "rules-profiling")]
     if profiling {
@@ -636,6 +664,8 @@ impl Component for ScanState {
 }
 
 use output_handler::*;
+
+use super::scan_target_parser;
 mod output_handler {
     use super::*;
     use std::collections::HashMap;

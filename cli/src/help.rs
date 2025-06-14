@@ -118,9 +118,9 @@ pub const THREADS_LONG_HELP: &str = r#"Use the specified number of threads
 
 The default value is automatically determined based on the number of CPU cores."#;
 
-pub const SCAN_LIST_LONG_HELP: &str = r#"Indicate that TARGET_PATH is a file containing the paths to be scanned
+pub const SCAN_LIST_LONG_HELP: &str = r#"Indicate that TARGET is a file containing the paths to be scanned
 
-<TARGET_PATH> must be a text file containing one path per line. The paths must
+<TARGET> must be a text file containing one path per line. The paths must
 be either absolute paths, or relative to the current directory."#;
 
 pub const SCAN_LONG_HELP: &str = r#"Scan a file or directory
@@ -133,7 +133,7 @@ Each path can be prefixed with a namespace, the namespace and the path are separ
 a semicolon (`:`), like in `namespace:rules_file.yar`. All rules in the path will be put
 under the specified namespace, isolated from rules in other namespaces.
 
-<TARGET_PATH> is the file or directory that will be scanned.
+<TARGET> is the file, directory, or pid that will be scanned.
 
 Examples:
 
@@ -144,10 +144,10 @@ yr scan namespace:rules_dir scanned_file"#;
 
 pub const SCAN_RECURSIVE_LONG_HELP: &str = r#"Scan directories recursively
 
-When <TARGET_PATH> is a directory, this option enables recursive scanning of its contents.
+When <TARGET> is a directory, this option enables recursive scanning of its contents.
 An optional <MAX_DEPTH> parameter can be specified to limit the scan depth. A MAX_DEPTH=1
-value restricts the scan to direct child directories of <TARGET_PATH>. If this option is
-not used, only the files within <TARGET_PATH> will be scanned, excluding its subdirectories.
+value restricts the scan to direct child directories of <TARGET>. If this option is
+not used, only the files within <TARGET> will be scanned, excluding its subdirectories.
 
 Examples:
 

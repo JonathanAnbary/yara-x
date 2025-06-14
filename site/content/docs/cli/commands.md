@@ -54,7 +54,7 @@ This is probably the most used command in the CLI, it allows to scan a file
 or directory with one or more YARA rules. The syntax for this command is:
 
 ```
-yr scan [OPTIONS] <[NAMESPACE:]RULES_PATH>... <TARGET_PATH>
+yr scan [OPTIONS] <[NAMESPACE:]RULES_PATH>... <TARGET>
 ```
 
 The command receives one or more `<RULES_PATH>` arguments. Each `<RULES_PATH>`
@@ -67,7 +67,7 @@ separated by a semicolon (`:`), like in `my_namespace:my_rules.yar`. All
 rules in the path will be put under the specified namespace, isolated from
 rules in other namespaces.
 
-`<TARGET_PATH>` is the path of the file or directory to be scanned.
+`<TARGET>` is the path of the file, directory, or pid to be scanned.
 
 The options supported by this command are:
 
@@ -272,9 +272,9 @@ allowing constructs that YARA-X doesn't accept by default.
 
 ### --scan-list
 
-Indicate that `<TARGET_PATH>` is a file containing the paths to be scanned.
+Indicate that `<TARGET>` is a file containing the paths to be scanned.
 
-`<TARGET_PATH>` must be a text file containing one path per line. The paths
+`<TARGET>` must be a text file containing one path per line. The paths
 must be either absolute paths, or relative to the current directory.
 
 ### --skip-larger <FILE_SIZE>
@@ -283,11 +283,11 @@ Skips files larger than the given size in bytes.
 
 ### --recursive[=<MAX_DEPTH>]
 
-When `<TARGET_PATH>` is a directory, this option enables recursive scanning of
+When `<TARGET>` is a directory, this option enables recursive scanning of
 its contents. An optional `<MAX_DEPTH>` parameter can be specified to limit the
 scan depth. A `MAX_DEPTH=1` value restricts the scan to direct child directories
-of `<TARGET_PATH>`. If this option is not used, only the files within
-`<TARGET_PATH>` will be scanned, excluding its subdirectories.
+of `<TARGET>`. If this option is not used, only the files within
+`<TARGET>` will be scanned, excluding its subdirectories.
 
 Examples:
 

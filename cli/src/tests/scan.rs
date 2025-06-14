@@ -234,9 +234,7 @@ fn recursive() {
         .assert()
         .failure()
         .code(1)
-        .stderr(
-            "error: can\'t use \'--recursive\' when <TARGET_PATH> is a file\n",
-        );
+        .stderr("error: can\'t use \'--recursive\' when <TARGET> is a file\n");
 }
 
 #[test]

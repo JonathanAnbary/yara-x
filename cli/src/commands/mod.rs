@@ -149,6 +149,23 @@ fn existing_path_parser(input: &str) -> Result<PathBuf, anyhow::Error> {
     }
 }
 
+#[derive(Clone)]
+enum Target {
+    /// The target to scan is a file or directory.
+    Path(PathBuf),
+    /// The target to scan is a process.
+    Pid(u32),
+}
+
+/// Parses either a path or a pid.
+fn scan_target_parser(input: &str) -> Result<Target, anyhow::Error> {
+    if input.chars().all(|c| c.is_digit(10)) {
+        Ok(Target::Pid(input.parse::<u32>()?))
+    } else {
+        Ok(Target::Path(PathBuf::from(input)))
+    }
+}
+
 pub fn create_compiler(
     external_vars: Option<Vec<(String, serde_json::Value)>>,
     args: &ArgMatches,
