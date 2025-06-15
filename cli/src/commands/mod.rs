@@ -149,7 +149,7 @@ fn existing_path_parser(input: &str) -> Result<PathBuf, anyhow::Error> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum Target {
     /// The target to scan is a file or directory.
     Path(PathBuf),
